@@ -1,9 +1,10 @@
 from typing import List, Optional
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.database import get_db
+from app.database import get_db, get_immediate_db
 from app.models import (
     Dataset, DatasetItem, DatasetReuse,
     DatasetVersion, DatasetReview, DatasetSubscription,
@@ -142,7 +143,7 @@ def get_dataset(dataset_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/datasets", response_model=DatasetResponse, tags=["数据集管理"])
-def create_dataset(data: DatasetCreate, db: Session = Depends(get_db)):
+def create_dataset(data: DatasetCreate, db: Session = Depends(get_immediate_db)):
     robot_model = db.query(RobotModel).filter(RobotModel.id == data.robot_model_id).first()
     if not robot_model:
         raise HTTPException(status_code=400, detail="机型不存在")
@@ -152,32 +153,36 @@ def create_dataset(data: DatasetCreate, db: Session = Depends(get_db)):
 
     dataset_data = data.model_dump(exclude={"operation_data_ids"})
     dataset = Dataset(**dataset_data)
-    db.add(dataset)
-    db.commit()
-    db.refresh(dataset)
+    try:
+        db.add(dataset)
+        db.commit()
+        db.refresh(dataset)
 
-    version = DatasetVersion(
-        dataset_id=dataset.id,
-        version_number=1,
-        version_label=dataset.version,
-        change_description="初始版本",
-        **_snapshot_version_stats(dataset)
-    )
-    db.add(version)
-    db.commit()
-    db.refresh(dataset)
+        version = DatasetVersion(
+            dataset_id=dataset.id,
+            version_number=1,
+            version_label=dataset.version,
+            change_description="初始版本",
+            **_snapshot_version_stats(dataset)
+        )
+        db.add(version)
+        db.commit()
+        db.refresh(dataset)
 
-    if data.operation_data_ids:
-        items = []
-        for op_id in data.operation_data_ids:
-            op = db.query(OperationData).filter(OperationData.id == op_id).first()
-            if op:
-                items.append(DatasetItem(dataset_id=dataset.id, operation_data_id=op_id))
-        if items:
-            db.bulk_save_objects(items)
-            db.commit()
-            db.refresh(dataset)
-            recalculate_dataset_stats(db, dataset)
+        if data.operation_data_ids:
+            items = []
+            for op_id in data.operation_data_ids:
+                op = db.query(OperationData).filter(OperationData.id == op_id).first()
+                if op:
+                    items.append(DatasetItem(dataset_id=dataset.id, operation_data_id=op_id))
+            if items:
+                db.bulk_save_objects(items)
+                db.commit()
+                db.refresh(dataset)
+                recalculate_dataset_stats(db, dataset)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="机型、场景或技能不存在或已被删除")
 
     return dataset
 

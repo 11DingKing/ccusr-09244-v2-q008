@@ -1,9 +1,10 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
 
-from app.database import get_db
+from app.database import get_db, get_immediate_db
 from app.models import OperationData, RobotModel, Scene, Skill, Annotation
 from app.schemas.operation import (
     OperationDataCreate, OperationDataUpdate, OperationDataResponse,
@@ -74,7 +75,7 @@ def get_operation_data(operation_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/operations", response_model=OperationDataResponse, tags=["作业数据"])
-def create_operation_data(data: OperationDataCreate, db: Session = Depends(get_db)):
+def create_operation_data(data: OperationDataCreate, db: Session = Depends(get_immediate_db)):
     robot_model = db.query(RobotModel).filter(RobotModel.id == data.robot_model_id).first()
     if not robot_model:
         raise HTTPException(status_code=400, detail="机型不存在")
@@ -87,13 +88,20 @@ def create_operation_data(data: OperationDataCreate, db: Session = Depends(get_d
 
     operation = OperationData(**data.model_dump())
     db.add(operation)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail="机型、场景或技能已被删除，无法新增作业"
+        )
     db.refresh(operation)
     return operation
 
 
 @router.post("/operations/batch", response_model=BatchOperationResponse, tags=["作业数据"])
-def create_operation_data_batch(data_list: List[OperationDataCreate], db: Session = Depends(get_db)):
+def create_operation_data_batch(data_list: List[OperationDataCreate], db: Session = Depends(get_immediate_db)):
     total = len(data_list)
     results: List[BatchOperationResultItem] = []
     success_count = 0

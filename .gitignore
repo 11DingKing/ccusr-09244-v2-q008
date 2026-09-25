@@ -14,8 +14,13 @@ data/*.db-journal
 data/*.mv.db
 data/*.trace.db
 venv/
+.venv/
 __pycache__/
 *.pyc
 .mypy_cache/
 vendor/
 .phpunit.result.cache
+
+# 默认 SQLite 数据库文件（DATABASE_URL=sqlite:///./robot_data.db）
+/*.db
+/*.db-journal

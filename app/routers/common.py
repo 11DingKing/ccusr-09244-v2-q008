@@ -1,16 +1,56 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.database import get_db
+from app.database import get_db, immediate_session
 from app.models import RobotModel, Scene, Skill
 from app.schemas.common import (
     RobotModelCreate, RobotModelUpdate, RobotModelResponse,
     SceneCreate, SceneUpdate, SceneResponse,
     SkillCreate, SkillUpdate, SkillResponse
 )
+from app.services.resource_guard import (
+    ResourceInUse,
+    ResourceNotFound,
+    delete_resource,
+)
 
 router = APIRouter()
+
+
+def _delete_guarded(resource_type: str, resource_id: int):
+    """在串行化写事务内完成引用检查与删除，统一三类基础资源的删除语义。"""
+    with immediate_session() as db:
+        try:
+            delete_resource(db, resource_type, resource_id)
+            db.commit()
+            return {"message": "删除成功"}
+        except ResourceNotFound as exc:
+            db.rollback()
+            raise HTTPException(status_code=404, detail=f"{exc.resource_type}不存在")
+        except ResourceInUse as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "resource_in_use",
+                    "message": f"{exc.resource_type}仍被引用，无法删除",
+                    **exc.summary.as_dict(),
+                },
+            )
+        except IntegrityError:
+            # 兜底：并发写入在检查后取得引用时由外键约束拦截
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "concurrent_reference",
+                    "message": "资源正被并发写入的作业或数据集引用，请稍后重试",
+                    "resource_type": resource_type,
+                    "resource_id": resource_id,
+                },
+            )
 
 
 @router.get("/robot-models", response_model=List[RobotModelResponse], tags=["基础资源"])
@@ -67,13 +107,8 @@ def update_robot_model(model_id: int, data: RobotModelUpdate, db: Session = Depe
 
 
 @router.delete("/robot-models/{model_id}", tags=["基础资源"])
-def delete_robot_model(model_id: int, db: Session = Depends(get_db)):
-    model = db.query(RobotModel).filter(RobotModel.id == model_id).first()
-    if not model:
-        raise HTTPException(status_code=404, detail="机型不存在")
-    db.delete(model)
-    db.commit()
-    return {"message": "删除成功"}
+def delete_robot_model(model_id: int):
+    return _delete_guarded("robot_model", model_id)
 
 
 @router.get("/scenes", response_model=List[SceneResponse], tags=["基础资源"])
@@ -133,13 +168,8 @@ def update_scene(scene_id: int, data: SceneUpdate, db: Session = Depends(get_db)
 
 
 @router.delete("/scenes/{scene_id}", tags=["基础资源"])
-def delete_scene(scene_id: int, db: Session = Depends(get_db)):
-    scene = db.query(Scene).filter(Scene.id == scene_id).first()
-    if not scene:
-        raise HTTPException(status_code=404, detail="场景不存在")
-    db.delete(scene)
-    db.commit()
-    return {"message": "删除成功"}
+def delete_scene(scene_id: int):
+    return _delete_guarded("scene", scene_id)
 
 
 @router.get("/skills", response_model=List[SkillResponse], tags=["基础资源"])
@@ -199,10 +229,5 @@ def update_skill(skill_id: int, data: SkillUpdate, db: Session = Depends(get_db)
 
 
 @router.delete("/skills/{skill_id}", tags=["基础资源"])
-def delete_skill(skill_id: int, db: Session = Depends(get_db)):
-    skill = db.query(Skill).filter(Skill.id == skill_id).first()
-    if not skill:
-        raise HTTPException(status_code=404, detail="技能不存在")
-    db.delete(skill)
-    db.commit()
-    return {"message": "删除成功"}
+def delete_skill(skill_id: int):
+    return _delete_guarded("skill", skill_id)
