@@ -1,5 +1,6 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -9,8 +10,38 @@ from app.schemas.common import (
     SceneCreate, SceneUpdate, SceneResponse,
     SkillCreate, SkillUpdate, SkillResponse
 )
+from app.services.resource_refs import RESOURCE_SPECS, collect_resource_references
 
 router = APIRouter()
+
+
+def _delete_base_resource(resource_type: str, resource_id: int, db: Session):
+    """三类基础资源共用的删除保护：事务内检查引用，冲突返回 409。
+
+    检查与删除之间若有并发新增引用，数据库外键会使删除失败，
+    此时重新统计引用并按冲突处理，保证不会出现悬空引用。
+    """
+    spec = RESOURCE_SPECS[resource_type]
+    resource = db.query(spec.model).filter(spec.model.id == resource_id).first()
+    if not resource:
+        raise HTTPException(status_code=404, detail=f"{spec.label}不存在")
+
+    summary = collect_resource_references(db, resource_type, resource_id)
+    if summary.has_references:
+        raise HTTPException(
+            status_code=409, detail=summary.conflict_detail(spec.label)
+        )
+
+    try:
+        db.delete(resource)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        summary = collect_resource_references(db, resource_type, resource_id)
+        raise HTTPException(
+            status_code=409, detail=summary.conflict_detail(spec.label)
+        )
+    return {"message": "删除成功"}
 
 
 @router.get("/robot-models", response_model=List[RobotModelResponse], tags=["基础资源"])
@@ -68,12 +99,7 @@ def update_robot_model(model_id: int, data: RobotModelUpdate, db: Session = Depe
 
 @router.delete("/robot-models/{model_id}", tags=["基础资源"])
 def delete_robot_model(model_id: int, db: Session = Depends(get_db)):
-    model = db.query(RobotModel).filter(RobotModel.id == model_id).first()
-    if not model:
-        raise HTTPException(status_code=404, detail="机型不存在")
-    db.delete(model)
-    db.commit()
-    return {"message": "删除成功"}
+    return _delete_base_resource("robot_model", model_id, db)
 
 
 @router.get("/scenes", response_model=List[SceneResponse], tags=["基础资源"])
@@ -134,12 +160,7 @@ def update_scene(scene_id: int, data: SceneUpdate, db: Session = Depends(get_db)
 
 @router.delete("/scenes/{scene_id}", tags=["基础资源"])
 def delete_scene(scene_id: int, db: Session = Depends(get_db)):
-    scene = db.query(Scene).filter(Scene.id == scene_id).first()
-    if not scene:
-        raise HTTPException(status_code=404, detail="场景不存在")
-    db.delete(scene)
-    db.commit()
-    return {"message": "删除成功"}
+    return _delete_base_resource("scene", scene_id, db)
 
 
 @router.get("/skills", response_model=List[SkillResponse], tags=["基础资源"])
@@ -200,9 +221,4 @@ def update_skill(skill_id: int, data: SkillUpdate, db: Session = Depends(get_db)
 
 @router.delete("/skills/{skill_id}", tags=["基础资源"])
 def delete_skill(skill_id: int, db: Session = Depends(get_db)):
-    skill = db.query(Skill).filter(Skill.id == skill_id).first()
-    if not skill:
-        raise HTTPException(status_code=404, detail="技能不存在")
-    db.delete(skill)
-    db.commit()
-    return {"message": "删除成功"}
+    return _delete_base_resource("skill", skill_id, db)

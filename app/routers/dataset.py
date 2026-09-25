@@ -1,13 +1,14 @@
 from typing import List, Optional
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import (
     Dataset, DatasetItem, DatasetReuse,
     DatasetVersion, DatasetReview, DatasetSubscription,
-    OperationData, Annotation, RobotModel, Scene
+    OperationData, Annotation, RobotModel, Scene, Skill
 )
 from app.services.aggregation import compute_dataset_quality_stats
 from app.schemas.dataset import (
@@ -149,11 +150,19 @@ def create_dataset(data: DatasetCreate, db: Session = Depends(get_db)):
     scene = db.query(Scene).filter(Scene.id == data.scene_id).first()
     if not scene:
         raise HTTPException(status_code=400, detail="场景不存在")
+    if data.skill_id is not None:
+        skill = db.query(Skill).filter(Skill.id == data.skill_id).first()
+        if not skill:
+            raise HTTPException(status_code=400, detail="技能不存在")
 
     dataset_data = data.model_dump(exclude={"operation_data_ids"})
     dataset = Dataset(**dataset_data)
     db.add(dataset)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="关联的机型、场景或技能不存在或已被删除")
     db.refresh(dataset)
 
     version = DatasetVersion(
@@ -203,9 +212,23 @@ def update_dataset(dataset_id: int, data: DatasetUpdate, db: Session = Depends(g
             raise HTTPException(status_code=400, detail="数据集尚未通过审核，无法发布")
         update_data["published_at"] = datetime.now(timezone.utc)
 
+    if "robot_model_id" in update_data:
+        if not db.query(RobotModel).filter(RobotModel.id == update_data["robot_model_id"]).first():
+            raise HTTPException(status_code=400, detail="机型不存在")
+    if "scene_id" in update_data:
+        if not db.query(Scene).filter(Scene.id == update_data["scene_id"]).first():
+            raise HTTPException(status_code=400, detail="场景不存在")
+    if update_data.get("skill_id") is not None:
+        if not db.query(Skill).filter(Skill.id == update_data["skill_id"]).first():
+            raise HTTPException(status_code=400, detail="技能不存在")
+
     for field, value in update_data.items():
         setattr(dataset, field, value)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="关联的机型、场景或技能不存在或已被删除")
     db.refresh(dataset)
     return dataset
 

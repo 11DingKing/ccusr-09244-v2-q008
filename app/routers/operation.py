@@ -1,5 +1,6 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
 
@@ -87,7 +88,11 @@ def create_operation_data(data: OperationDataCreate, db: Session = Depends(get_d
 
     operation = OperationData(**data.model_dump())
     db.add(operation)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="关联的机型、场景或技能不存在或已被删除")
     db.refresh(operation)
     return operation
 
@@ -166,9 +171,22 @@ def update_operation_data(operation_id: int, data: OperationDataUpdate, db: Sess
     if not operation:
         raise HTTPException(status_code=404, detail="作业数据不存在")
     update_data = data.model_dump(exclude_unset=True)
+    if "robot_model_id" in update_data:
+        if not db.query(RobotModel).filter(RobotModel.id == update_data["robot_model_id"]).first():
+            raise HTTPException(status_code=400, detail="机型不存在")
+    if "scene_id" in update_data:
+        if not db.query(Scene).filter(Scene.id == update_data["scene_id"]).first():
+            raise HTTPException(status_code=400, detail="场景不存在")
+    if "skill_id" in update_data:
+        if not db.query(Skill).filter(Skill.id == update_data["skill_id"]).first():
+            raise HTTPException(status_code=400, detail="技能不存在")
     for field, value in update_data.items():
         setattr(operation, field, value)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="关联的机型、场景或技能不存在或已被删除")
     db.refresh(operation)
     return operation
 
